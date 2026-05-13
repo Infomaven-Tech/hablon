@@ -110,7 +110,7 @@ def test_mermaid_status_classes_applied():
     out = render.to_mermaid(data, TODAY)
     assert "class T1 active" in out
     assert "class T2 delegated" in out
-    assert "class T3 open,big_ticket" in out
+    assert "class T3 big_ticket" in out  # big_ticket is exclusive — no status class alongside it
 
 
 def test_mermaid_overdue_class_overrides_status():

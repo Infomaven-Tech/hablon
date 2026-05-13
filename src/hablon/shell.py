@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import cmd
-from datetime import date, datetime
+from datetime import date
+from typing import Any
 
 from . import model, parsing, render, store
-from .buckets import assign_buckets
+from .buckets import Task, assign_buckets
+
+Data = dict[str, Any]
 
 BASE_PROMPT = "hablon"
 
@@ -20,9 +23,9 @@ class Shell(cmd.Cmd):
 
     def __init__(self) -> None:
         super().__init__()
-        self.project: str | None = None
-        self.data: dict | None = None
-        self._render_opts = {"no_past": False, "show_done": False}
+        self.project: str = ""
+        self.data: Data = {}
+        self._render_opts: dict[str, bool] = {"no_past": False, "show_done": False}
 
     # ---------- prompt / state helpers ----------
 
@@ -30,11 +33,8 @@ class Shell(cmd.Cmd):
         if not self.project:
             self.prompt = f"{BASE_PROMPT}> "
             return
-        data = self.data or {}
-        tasks = data.get("tasks") or []
-        open_active = sum(
-            1 for t in tasks if t["status"] in ("open", "active")
-        )
+        tasks: list[Task] = self.data.get("tasks") or []
+        open_active = sum(1 for t in tasks if t["status"] in ("open", "active"))
         today = date.today()
         buckets_map = assign_buckets(
             [t for t in tasks if t["status"] != "cancelled"], today
@@ -47,29 +47,33 @@ class Shell(cmd.Cmd):
         self.prompt = f"{self.project} ({open_active} open, {overdue} overdue)> "
 
     def _require_project(self) -> bool:
-        if not self.project or self.data is None:
+        if not self.project:
             print("No project selected. Run `use <name>` first.")
             return False
         return True
 
     def _save_and_render(self) -> None:
-        assert self.project is not None and self.data is not None
         store.save(self.project, self.data)
-        path = render.write_md(self.project, self.data, date.today(), **self._render_opts)
+        path = render.write_md(
+            self.project, self.data, date.today(), **self._render_opts
+        )
         self._refresh_prompt()
         print(f"Saved. Re-rendered {path}.")
 
-    def _find(self, tid: str) -> dict | None:
-        assert self.data is not None
-        for t in self.data["tasks"]:
+    def _find(self, tid: str) -> Task | None:
+        tasks: list[Task] = self.data.get("tasks") or []
+        for t in tasks:
             if t["id"] == tid:
                 return t
         print(f"Task {tid} not found.")
         return None
 
+    def _tasks(self) -> list[Task]:
+        return self.data.get("tasks") or []
+
     # ---------- generic argparse runner ----------
 
-    def _run(self, parser: argparse.ArgumentParser, raw: str):
+    def _run(self, parser: argparse.ArgumentParser, raw: str) -> argparse.Namespace | None:
         try:
             tokens = parsing.split_args(raw)
             return parser.parse_args(tokens)
@@ -81,7 +85,7 @@ class Shell(cmd.Cmd):
 
     # ---------- project commands ----------
 
-    def do_use(self, arg: str):
+    def do_use(self, arg: str) -> None:
         """use <project>  — switch active project (creates if missing)."""
         name = arg.strip()
         if not name:
@@ -98,7 +102,7 @@ class Shell(cmd.Cmd):
         self._refresh_prompt()
         print(f"Switched to project: {name}")
 
-    def do_mkproject(self, arg: str):
+    def do_mkproject(self, arg: str) -> None:
         """mkproject <name>  — create a new project and switch to it."""
         name = arg.strip()
         if not name:
@@ -116,24 +120,23 @@ class Shell(cmd.Cmd):
         self._refresh_prompt()
         print(f"Created project: {name}")
 
-    def do_projects(self, _arg: str):
+    def do_projects(self, _arg: str) -> None:
         """projects  — list all tracked projects."""
         names = store.list_projects()
         if not names:
             print("(no projects yet — `mkproject <name>` to create one)")
             return
         for n in names:
-            data = store.load(n)
-            count = sum(
-                1 for t in data["tasks"] if t["status"] in ("open", "active")
-            )
+            data: Data = store.load(n)
+            tasks: list[Task] = data.get("tasks") or []
+            count = sum(1 for t in tasks if t["status"] in ("open", "active"))
             marker = "*" if n == self.project else " "
             print(f"{marker} {n}  ({count} open/active)")
 
     # ---------- task commands ----------
 
-    def do_add(self, arg: str):
-        """add "<title>" [--due YYYY-MM-DD] [--depends T1,T2] [--notes "..."] [--big-ticket]"""
+    def do_add(self, arg: str) -> None:
+        """add "<title>" [--due YYYY-MM-DD|today] [--depends T1,T2] [--notes "..."] [--big-ticket]"""
         if not self._require_project():
             return
         p = parsing.make_parser("add")
@@ -146,18 +149,25 @@ class Shell(cmd.Cmd):
         if ns is None:
             return
         if ns.due:
+            if ns.due == "today":
+                ns.due = date.today().isoformat()
             try:
                 date.fromisoformat(ns.due)
             except ValueError:
-                print(f"error: --due must be YYYY-MM-DD (got {ns.due!r})")
+                print(f"error: --due must be YYYY-MM-DD or 'today' (got {ns.due!r})")
                 return
-        deps = [d.strip() for d in ns.depends.split(",") if d.strip()] if ns.depends else []
+        deps = (
+            [d.strip() for d in ns.depends.split(",") if d.strip()]
+            if ns.depends
+            else []
+        )
+        tasks = self._tasks()
         for d in deps:
-            if not any(t["id"] == d for t in self.data["tasks"]):
+            if not any(t["id"] == d for t in tasks):
                 print(f"error: depends-on {d!r} does not exist")
                 return
         tid, next_n = store.next_task_id(self.data)
-        task = model.new_task(
+        task: Task = model.new_task(
             tid,
             ns.title,
             created=model.now_iso_offset(),
@@ -166,19 +176,20 @@ class Shell(cmd.Cmd):
             notes=parsing.decode_nl(ns.notes),
             big_ticket=ns.big_ticket,
         )
-        self.data["tasks"].append(task)
+        tasks.append(task)
+        self.data["tasks"] = tasks
         self.data["next_id"] = next_n
         try:
             self._save_and_render()
         except model.ValidationError as e:
-            self.data["tasks"].pop()
+            tasks.pop()
             self.data["next_id"] -= 1
             print(f"error: {e}")
             return
         print(f"Added {tid}.")
 
-    def do_list(self, arg: str):
-        """list [open|active|delegated|done|all] [--bucket past|week|month|future] [--big-ticket]"""
+    def do_list(self, arg: str) -> None:
+        """list [open|active|delegated|done|all] [--bucket past|today|week|month|future] [--big-ticket]"""
         if not self._require_project():
             return
         p = parsing.make_parser("list")
@@ -188,17 +199,18 @@ class Shell(cmd.Cmd):
             default="visible",
             choices=["open", "active", "delegated", "done", "all", "visible"],
         )
-        p.add_argument("--bucket", choices=["past", "week", "month", "future"])
+        p.add_argument("--bucket", choices=["past", "today", "week", "month", "future"])
         p.add_argument("--big-ticket", dest="big_ticket", action="store_true")
         ns = self._run(p, arg)
         if ns is None:
             return
         today = date.today()
+        tasks = self._tasks()
         buckets_map = assign_buckets(
-            [t for t in self.data["tasks"] if t["status"] != "cancelled"], today
+            [t for t in tasks if t["status"] != "cancelled"], today
         )
-        rows = []
-        for t in self.data["tasks"]:
+        rows: list[tuple[Task, str]] = []
+        for t in tasks:
             if t["status"] == "cancelled":
                 continue
             if ns.status == "visible" and t["status"] in ("done",):
@@ -217,12 +229,13 @@ class Shell(cmd.Cmd):
         print("-" * 60)
         for t, b in rows:
             tag = "*" if t.get("big_ticket") else " "
-            title = t["title"]
+            title: str = t["title"]
             if len(title) > 40:
                 title = title[:37] + "..."
-            print(f"{t['id']:<5} {t['status']:<10} {b:<7} {(t.get('due') or '-'):<12}{tag}{title}")
+            due_str: str = t.get("due") or "-"
+            print(f"{t['id']:<5} {t['status']:<10} {b:<7} {due_str:<12}{tag}{title}")
 
-    def do_show(self, arg: str):
+    def do_show(self, arg: str) -> None:
         """show <id>"""
         if not self._require_project():
             return
@@ -234,20 +247,22 @@ class Shell(cmd.Cmd):
         if not t:
             return
         print(f"{t['id']}  {t['title']}")
-        print(f"  status:   {t['status']}{'  [big-ticket]' if t.get('big_ticket') else ''}")
+        big_marker = "  [big-ticket]" if t.get("big_ticket") else ""
+        print(f"  status:   {t['status']}{big_marker}")
         print(f"  due:      {t.get('due') or '-'}")
-        print(f"  depends:  {', '.join(t.get('depends_on') or []) or '-'}")
+        deps_list: list[str] = t.get("depends_on") or []
+        print(f"  depends:  {', '.join(deps_list) or '-'}")
         print(f"  created:  {t.get('created') or '-'}")
         print(f"  started:  {t.get('started') or '-'}")
         print(f"  completed:{t.get('completed') or '-'}")
-        notes = t.get("notes") or ""
+        notes: str = t.get("notes") or ""
         if notes:
             print("  notes:")
             for line in notes.split("\n"):
                 print(f"    {line}")
 
-    def do_edit(self, arg: str):
-        """edit <id> [--title "..."] [--due YYYY-MM-DD] [--clear-due] [--notes "..."]"""
+    def do_edit(self, arg: str) -> None:
+        """edit <id> [--title "..."] [--due YYYY-MM-DD|today] [--clear-due] [--notes "..."]"""
         if not self._require_project():
             return
         p = parsing.make_parser("edit")
@@ -267,17 +282,19 @@ class Shell(cmd.Cmd):
         if ns.clear_due:
             t["due"] = None
         if ns.due:
+            if ns.due == "today":
+                ns.due = date.today().isoformat()
             try:
                 date.fromisoformat(ns.due)
             except ValueError:
-                print(f"error: --due must be YYYY-MM-DD")
+                print("error: --due must be YYYY-MM-DD or 'today'")
                 return
             t["due"] = ns.due
         if ns.notes is not None:
             t["notes"] = parsing.decode_nl(ns.notes)
         self._save_and_render()
 
-    def do_notes(self, arg: str):
+    def do_notes(self, arg: str) -> None:
         """notes <id>  — enter multi-line notes; end with a single `.` line or Ctrl+D."""
         if not self._require_project():
             return
@@ -302,7 +319,7 @@ class Shell(cmd.Cmd):
         t["notes"] = "\n".join(lines)
         self._save_and_render()
 
-    def _transition(self, arg: str, new_status: model.Status):
+    def _transition(self, arg: str, new_status: model.Status) -> None:
         if not self._require_project():
             return
         tid = arg.strip()
@@ -315,35 +332,35 @@ class Shell(cmd.Cmd):
         model.transition(t, new_status, model.now_iso_offset())
         self._save_and_render()
 
-    def do_start(self, arg: str):
+    def do_start(self, arg: str) -> None:
         """start <id>  — mark task as active."""
         self._transition(arg, "active")
 
-    def do_delegate(self, arg: str):
+    def do_delegate(self, arg: str) -> None:
         """delegate <id>  — mark task as delegated."""
         self._transition(arg, "delegated")
 
-    def do_done(self, arg: str):
+    def do_done(self, arg: str) -> None:
         """done <id>  — mark task as done."""
         self._transition(arg, "done")
 
-    def do_cancel(self, arg: str):
+    def do_cancel(self, arg: str) -> None:
         """cancel <id>  — mark task as cancelled."""
         self._transition(arg, "cancelled")
 
-    def do_reopen(self, arg: str):
+    def do_reopen(self, arg: str) -> None:
         """reopen <id>  — move task back to open."""
         self._transition(arg, "open")
 
-    def do_tag(self, arg: str):
+    def do_tag(self, arg: str) -> None:
         """tag <id> --big-ticket"""
         self._set_flag(arg, True)
 
-    def do_untag(self, arg: str):
+    def do_untag(self, arg: str) -> None:
         """untag <id> --big-ticket"""
         self._set_flag(arg, False)
 
-    def _set_flag(self, arg: str, value: bool):
+    def _set_flag(self, arg: str, value: bool) -> None:
         if not self._require_project():
             return
         p = parsing.make_parser("tag" if value else "untag")
@@ -361,7 +378,7 @@ class Shell(cmd.Cmd):
         t["big_ticket"] = value
         self._save_and_render()
 
-    def do_depend(self, arg: str):
+    def do_depend(self, arg: str) -> None:
         """depend <id> on <other-id>"""
         if not self._require_project():
             return
@@ -374,17 +391,19 @@ class Shell(cmd.Cmd):
         tb = self._find(b)
         if not ta or not tb:
             return
-        if b in (ta.get("depends_on") or []):
+        existing: list[str] = ta.get("depends_on") or []
+        if b in existing:
             print(f"{a} already depends on {b}.")
             return
-        ta.setdefault("depends_on", []).append(b)
+        deps: list[str] = ta.setdefault("depends_on", [])
+        deps.append(b)
         try:
             self._save_and_render()
         except model.ValidationError as e:
-            ta["depends_on"].remove(b)
+            deps.remove(b)
             print(f"error: {e}")
 
-    def do_undepend(self, arg: str):
+    def do_undepend(self, arg: str) -> None:
         """undepend <id> on <other-id>"""
         if not self._require_project():
             return
@@ -396,14 +415,14 @@ class Shell(cmd.Cmd):
         ta = self._find(a)
         if not ta:
             return
-        deps = ta.get("depends_on") or []
+        deps: list[str] = ta.get("depends_on") or []
         if b not in deps:
             print(f"{a} does not depend on {b}.")
             return
         deps.remove(b)
         self._save_and_render()
 
-    def do_rm(self, arg: str):
+    def do_rm(self, arg: str) -> None:
         """rm <id> [--force]"""
         if not self._require_project():
             return
@@ -416,20 +435,24 @@ class Shell(cmd.Cmd):
         t = self._find(ns.id)
         if not t:
             return
-        dependents = [o["id"] for o in self.data["tasks"] if ns.id in (o.get("depends_on") or [])]
+        tasks = self._tasks()
+        dependents: list[str] = [
+            o["id"] for o in tasks if ns.id in (o.get("depends_on") or [])
+        ]
         if dependents and not ns.force:
             print(f"error: {dependents} depend on {ns.id}. Use --force to remove anyway.")
             return
-        self.data["tasks"] = [x for x in self.data["tasks"] if x["id"] != ns.id]
+        self.data["tasks"] = [x for x in tasks if x["id"] != ns.id]
         if ns.force:
             for o in self.data["tasks"]:
-                if ns.id in (o.get("depends_on") or []):
-                    o["depends_on"].remove(ns.id)
+                o_deps: list[str] = o.get("depends_on") or []
+                if ns.id in o_deps:
+                    o_deps.remove(ns.id)
         self._save_and_render()
 
     # ---------- rendering commands ----------
 
-    def do_render(self, arg: str):
+    def do_render(self, arg: str) -> None:
         """render [--no-past] [--show-done]"""
         if not self._require_project():
             return
@@ -447,35 +470,35 @@ class Shell(cmd.Cmd):
         )
         print(f"Rendered {path}.")
 
-    def do_future(self, arg: str):
+    def do_future(self, arg: str) -> None:
         """future  — alias for `render --no-past`."""
         self.do_render(arg + " --no-past")
 
-    def do_reorganize(self, arg: str):
+    def do_reorganize(self, arg: str) -> None:
         """reorganize  — alias for `render` against today's date."""
         self.do_render(arg)
 
     # ---------- exit ----------
 
-    def do_exit(self, _arg: str):
+    def do_exit(self, _arg: str) -> bool:
         """exit  — leave the shell."""
         print("Goodbye.")
         return True
 
-    def do_quit(self, _arg: str):
+    def do_quit(self, _arg: str) -> bool:
         """quit  — alias for exit."""
         return self.do_exit(_arg)
 
-    def do_EOF(self, _arg: str):
+    def do_EOF(self, _arg: str) -> bool:
         print()
         return self.do_exit(_arg)
 
     # ---------- ergonomics ----------
 
-    def emptyline(self):
-        pass
+    def emptyline(self) -> bool:
+        return False
 
-    def default(self, line: str):
+    def default(self, line: str) -> None:
         print(f"Unknown command: {line.split()[0]}. Type `help`.")
 
 

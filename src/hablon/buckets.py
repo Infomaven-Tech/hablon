@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Iterable, Literal
+from typing import Any, Iterable, Literal
 
-Bucket = Literal["past", "week", "month", "future"]
-BUCKET_ORDER: tuple[Bucket, ...] = ("past", "week", "month", "future")
+Task = dict[str, Any]
+Bucket = Literal["past", "today", "week", "month", "future"]
+BUCKET_ORDER: tuple[Bucket, ...] = ("past", "today", "week", "month", "future")
 BUCKET_LABELS: dict[Bucket, str] = {
     "past": "Past due",
+    "today": "Today",
     "week": "This week",
     "month": "2–4 weeks",
     "future": "Future",
@@ -17,6 +19,8 @@ def bucket_for(due: date, today: date) -> Bucket:
     delta = (due - today).days
     if delta < 0:
         return "past"
+    if delta == 0:
+        return "today"
     if delta <= 7:
         return "week"
     if delta <= 28:
@@ -24,59 +28,66 @@ def bucket_for(due: date, today: date) -> Bucket:
     return "future"
 
 
-def _bucket_rank(b: Bucket) -> int:
-    return BUCKET_ORDER.index(b)
-
-
-def assign_buckets(tasks: Iterable[dict], today: date) -> dict[str, Bucket]:
+def assign_buckets(tasks: Iterable[Task], today: date) -> dict[str, Bucket]:
     """Return {task_id: Bucket} for every task.
 
-    Dated tasks: bucket_for(due, today).
-    No-due tasks: latest bucket among dated members of the same connected
-    component (dependency graph, edges either direction). Isolated no-due
-    tasks fall back to 'future'.
+    Terminal tasks (done/cancelled): bucket_for(completed, today).
+    Other dated tasks: bucket_for(due, today).
+    No-due tasks: bucket of the next task with a due date in the forward
+    dependency chain. Isolated no-due tasks fall back to 'future'.
     """
-    tasks = list(tasks)
-    by_id = {t["id"]: t for t in tasks}
+    task_list: list[Task] = list(tasks)
+    by_id: dict[str, Task] = {t["id"]: t for t in task_list}
 
-    adj: dict[str, set[str]] = {t["id"]: set() for t in tasks}
-    for t in tasks:
-        for dep in t.get("depends_on") or []:
-            if dep in adj:
-                adj[t["id"]].add(dep)
-                adj[dep].add(t["id"])
+    depends: dict[str, set[str]] = {
+        t["id"]: set(t.get("depends_on") or []) for t in task_list
+    }
 
-    components: list[set[str]] = []
-    seen: set[str] = set()
-    for tid in adj:
-        if tid in seen:
-            continue
-        stack = [tid]
-        comp: set[str] = set()
-        while stack:
-            n = stack.pop()
-            if n in comp:
-                continue
-            comp.add(n)
-            seen.add(n)
-            stack.extend(adj[n] - comp)
-        components.append(comp)
+    depended_by: dict[str, set[str]] = {t["id"]: set() for t in task_list}
+    for tid, deps in depends.items():
+        for dep in deps:
+            if dep in depended_by:
+                depended_by[dep].add(tid)
 
     result: dict[str, Bucket] = {}
-    for comp in components:
-        dated_buckets: list[Bucket] = []
-        for tid in comp:
-            due = by_id[tid].get("due")
-            if due:
-                dated_buckets.append(bucket_for(date.fromisoformat(due), today))
-        latest: Bucket = (
-            max(dated_buckets, key=_bucket_rank) if dated_buckets else "future"
-        )
-        for tid in comp:
-            due = by_id[tid].get("due")
-            if due:
-                result[tid] = bucket_for(date.fromisoformat(due), today)
+
+    for t in task_list:
+        tid: str = t["id"]
+
+        if t["status"] in ("done", "cancelled"):
+            completed: str | None = t.get("completed")
+            if completed:
+                completed_date = date.fromisoformat(completed[:10])
+                result[tid] = bucket_for(completed_date, today)
             else:
-                result[tid] = latest
+                result[tid] = "future"
+            continue
+
+        due: str | None = t.get("due")
+        if due:
+            result[tid] = bucket_for(date.fromisoformat(due), today)
+            continue
+
+        visited: set[str] = set()
+        stack: list[str] = [tid]
+        found_bucket: Bucket | None = None
+
+        while stack and not found_bucket:
+            current: str = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+
+            for dependent in depended_by[current]:
+                if dependent in visited:
+                    continue
+                dep_task: Task = by_id[dependent]
+                dep_due: str | None = dep_task.get("due")
+                if dep_due:
+                    found_bucket = bucket_for(date.fromisoformat(dep_due), today)
+                    break
+                stack.append(dependent)
+
+        result[tid] = found_bucket or "future"
 
     return result

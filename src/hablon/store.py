@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from . import model
+
+Data = dict[str, Any]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PROJECTS_DIR = REPO_ROOT / "projects"
@@ -30,11 +33,11 @@ def list_projects() -> list[str]:
     )
 
 
-def empty_project(name: str) -> dict:
+def empty_project(name: str) -> Data:
     return {"project": name, "next_id": 1, "tasks": []}
 
 
-def load(name: str) -> dict:
+def load(name: str) -> Data:
     path = project_json(name)
     if not path.exists():
         return empty_project(name)
@@ -42,7 +45,7 @@ def load(name: str) -> dict:
         return json.load(f)
 
 
-def save(name: str, data: dict) -> None:
+def save(name: str, data: Data) -> None:
     model.validate(data)
     target = project_json(name)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -57,6 +60,6 @@ def project_exists(name: str) -> bool:
     return project_json(name).exists()
 
 
-def next_task_id(data: dict) -> tuple[str, int]:
+def next_task_id(data: Data) -> tuple[str, int]:
     n = data.get("next_id", 1)
     return f"T{n}", n + 1

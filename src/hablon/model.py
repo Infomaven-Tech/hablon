@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Iterable, Literal
+from typing import Any, Iterable, Literal
 
+Task = dict[str, Any]
 Status = Literal["open", "active", "delegated", "done", "cancelled"]
 STATUSES: tuple[Status, ...] = ("open", "active", "delegated", "done", "cancelled")
 TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "cancelled"})
@@ -21,7 +22,7 @@ def new_task(
     depends_on: list[str] | None = None,
     notes: str = "",
     big_ticket: bool = False,
-) -> dict:
+) -> Task:
     return {
         "id": task_id,
         "title": title,
@@ -36,7 +37,7 @@ def new_task(
     }
 
 
-def transition(task: dict, new_status: Status, now: str) -> None:
+def transition(task: Task, new_status: Status, now: str) -> None:
     """In-place status transition with timestamp bookkeeping."""
     if new_status not in STATUSES:
         raise ValidationError(f"unknown status: {new_status!r}")
@@ -52,7 +53,7 @@ def transition(task: dict, new_status: Status, now: str) -> None:
     task["status"] = new_status
 
 
-def check_acyclic(tasks: Iterable[dict]) -> None:
+def check_acyclic(tasks: Iterable[Task]) -> None:
     """DFS-based cycle detection over depends_on edges."""
     tasks = list(tasks)
     by_id = {t["id"]: t for t in tasks}
@@ -76,7 +77,7 @@ def check_acyclic(tasks: Iterable[dict]) -> None:
             visit(tid, [])
 
 
-def validate(data: dict) -> None:
+def validate(data: Task) -> None:
     tasks = data.get("tasks") or []
     ids = [t["id"] for t in tasks]
     if len(ids) != len(set(ids)):

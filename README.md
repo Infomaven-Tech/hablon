@@ -4,9 +4,11 @@
 
 A single-binary-style Python REPL for tracking personal/per-project tasks. Stdlib only. Plain JSON on disk, Markdown + Mermaid for visualization.
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+
 ## Why
 
-- **Forward-looking.** Tasks are grouped automatically into *Past due*, *This week*, *2–4 weeks*, and *Future* based on each task's due date relative to today. Run `reorganize` and the diagram re-buckets against the current date — no manual reordering as plans age.
+- **Forward-looking.** Tasks are grouped automatically into *Past due*, *Today*, *This week*, *2–4 weeks*, and *Future* based on each task's due date relative to today. Run `reorganize` and the diagram re-buckets against the current date — no manual reordering as plans age.
 - **Dependencies are first-class.** `depend T2 on T1` becomes an edge in the Mermaid flowchart. Cycles are rejected on save.
 - **Everything is text.** JSON source of truth, Markdown view file, both readable by hand and easy to diff in git.
 - **No services, no API keys, no third-party packages.** Python 3.10+ stdlib only.
@@ -39,8 +41,8 @@ hablon — weave your tasks together.
 Type `help` for commands, `mkproject <name>` or `use <name>` to select a project, `exit` to quit.
 hablon> mkproject demo
 Created project: demo
-demo (0 open, 0 overdue)> add "Draft v2 architecture" --due 2026-05-22 --big-ticket
-demo (1 open, 0 overdue)> add "Fix off-by-one in pagination" --due 2026-05-15 --depends T1
+demo (0 open, 0 overdue)> add "Draft v2 architecture" --due 2026-05-15 --big-ticket
+demo (1 open, 0 overdue)> add "Fix off-by-one in pagination" --due 2026-05-22 --depends T1
 demo (2 open, 0 overdue)> add "Schedule design review"
 demo (2 open, 0 overdue)> notes T1
 Enter notes for T1. End with a single '.' on its own line.
@@ -50,6 +52,32 @@ Enter notes for T1. End with a single '.' on its own line.
 demo (2 open, 0 overdue)> start T2
 demo (2 open, 0 overdue)> render
 Rendered projects/demo/tasks.md.
+```
+
+The resulting `projects/demo/tasks.md` renders as:
+
+```mermaid
+flowchart LR
+  subgraph week["This week"]
+    T1["<b>Draft v2 architecture</b><br><small>T1 · 2026-05-15<br>Cover migration steps for every module.<br>Confirm rollback procedure.</small>"]
+  end
+  subgraph month["2–4 weeks"]
+    T2["<b>Fix off-by-one in pagination</b><br><small>T2 · 2026-05-22</small>"]
+  end
+  subgraph fut["Future"]
+    T3["<b>Schedule design review</b><br><small>T3 · no due</small>"]
+  end
+  T1 --> T2
+  class T1 big_ticket
+  class T2 active
+  class T3 open
+
+  classDef open fill:#eef,stroke:#557
+  classDef active fill:#ffe7a8,stroke:#c89000,stroke-width:2px
+  classDef delegated fill:#e8e0ff,stroke:#7a5cd6,stroke-dasharray:4 2
+  classDef done fill:#dfd,stroke:#393,color:#666
+  classDef overdue fill:#fdd,stroke:#c33
+  classDef big_ticket fill:#ffeb99,stroke:#ff6b6b,stroke-width:5px
 ```
 
 Open `projects/demo/tasks.md` in VS Code (with the Mermaid extension) or push it to GitHub to see the woven diagram.
@@ -88,7 +116,7 @@ All commands accept arguments at the REPL prompt — no flags repeated across in
 | Command | Purpose |
 |---|---|
 | `add "<title>" [--due YYYY-MM-DD] [--depends T1,T2] [--notes "..."] [--big-ticket]` | Create a task. `\n` inside `--notes` becomes a newline. |
-| `list [open\|active\|delegated\|done\|all] [--bucket past\|week\|month\|future] [--big-ticket]` | Tabular view. Default hides done/cancelled. |
+| `list [open\|active\|delegated\|done\|all] [--bucket past\|today\|week\|month\|future] [--big-ticket]` | Tabular view. Default hides done/cancelled. |
 | `show <id>` | Full detail for one task with multi-line notes rendered. |
 | `edit <id> [--title ...] [--due ...] [--clear-due] [--notes ...]` | Mutate fields. |
 | `notes <id>` | Enter multi-line notes mode. End with a `.` on its own line. |
@@ -127,11 +155,12 @@ For each task with a `due` date:
 | Days from today | Bucket |
 |---|---|
 | `< 0` (overdue) | **Past** |
-| `0 – 7` | **This week** |
+| `= 0` (due today) | **Today** |
+| `1 – 7` | **This week** |
 | `8 – 28` | **2–4 weeks** |
 | `> 28` | **Future** |
 
-For a task **without** a `due` date, hablon walks the dependency graph (edges in either direction) to find the connected component the task belongs to, then places it in the **latest** bucket reached by any dated task in that component. Isolated no-due tasks fall back to Future. The intent: no-due tasks visually sit next to the leaf they hang off.
+For a task **without** a `due` date, hablon walks **forward** through the dependency graph — following tasks that depend *on* the no-due task — and assigns the bucket of the first dated task reached. Isolated no-due tasks (no forward dependents with a due date) fall back to Future.
 
 `render --no-past` (a.k.a. `future`) hides only **done** and **cancelled** tasks from the past bucket. Overdue tasks that are still `open` / `active` / `delegated` stay visible — they still need attention.
 
@@ -141,16 +170,7 @@ Mermaid output uses:
 
 - Bold task title with the ID, due date, and the first 2 lines of notes (truncated with `…`) underneath in `<small>` text.
 - Status-driven CSS classes: `open` (pale blue), `active` (amber, thick), `delegated` (purple, dashed), `done` (green, muted), `overdue` (red — applied to any past-bucket task regardless of status).
-- `big_ticket` adds a thick black stroke on top of whatever status class the task has.
-
-## Tests
-
-```
-pip install pytest
-python -m pytest
-```
-
-51 tests across `tests/`.
+- `big_ticket` **overrides** the status class — a big-ticket task renders with the `big_ticket` style regardless of its current status.
 
 ## License
 
